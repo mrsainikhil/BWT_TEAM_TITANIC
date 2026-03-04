@@ -43,6 +43,7 @@ class MobileRegistration(BaseModel):
     user_id: str
     url: str
     phone: str
+ 
 
 class Connections:
     def __init__(self):
@@ -193,6 +194,9 @@ async def register_mobile(reg: MobileRegistration):
 @app.get("/metrics")
 async def get_metrics():
     return JSONResponse(metrics)
+@app.get("/healthz")
+async def healthz():
+    return JSONResponse({"status": "ok"})
 
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
