@@ -32,6 +32,15 @@ def compute_anomaly(txn: Dict[str, Any], profile: Dict[str, Any]) -> Tuple[float
     if h < 6 or h > 22:
         score += 0.1
         reasons.append("time_anomaly")
+    payee = str(txn.get("payee_id", "") or "")
+    rec_hist = profile.get("recipient_history", "[]")
+    try:
+        rh = json.loads(rec_hist)
+    except:
+        rh = []
+    if payee and payee not in rh:
+        score += 0.2
+        reasons.append("recipient_anomaly")
     try:
         lat = float(txn.get("upi_lat")) if txn.get("upi_lat") is not None else None
         lon = float(txn.get("upi_lon")) if txn.get("upi_lon") is not None else None

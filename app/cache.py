@@ -66,6 +66,7 @@ async def get_user_profile(user_id: str) -> Dict[str, Any]:
             "frequent_locations": json.dumps(["Delhi"]),
             "frequent_geo_locations": json.dumps([{"lat": 28.6139, "lon": 77.2090}]),
             "device_history": json.dumps([]),
+            "recipient_history": json.dumps([]),
             "transaction_frequency": 1,
         }
     return {
@@ -74,6 +75,7 @@ async def get_user_profile(user_id: str) -> Dict[str, Any]:
         "frequent_locations": v.get("frequent_locations", json.dumps(["Delhi"])),
         "frequent_geo_locations": v.get("frequent_geo_locations", json.dumps([{"lat": 28.6139, "lon": 77.2090}])),
         "device_history": v.get("device_history", json.dumps([])),
+        "recipient_history": v.get("recipient_history", json.dumps([])),
         "transaction_frequency": int(v.get("transaction_frequency", 1)),
     }
 

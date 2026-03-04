@@ -25,6 +25,7 @@ class Transaction(BaseModel):
     device_id: str
     merchant: str
     timestamp: str
+    payee_id: str | None = None
     upi_app: str | None = None
     upi_lat: float | None = None
     upi_lon: float | None = None
@@ -106,6 +107,13 @@ async def process_transaction(txn: Transaction, request: Request):
         resp = {"decision": decision, "explanation": explanation, "flagged": flagged}
         await cache_set(key, resp)
         await update_user_profile(txn.user_id, {"transaction_frequency": profile.get("transaction_frequency", 1) + 1})
+        try:
+            rh = json.loads(profile.get("recipient_history", "[]"))
+        except:
+            rh = []
+        if payload.get("payee_id") and payload["payee_id"] not in rh:
+            rh.append(payload["payee_id"])
+            await update_user_profile(txn.user_id, {"recipient_history": json.dumps(rh)})
     await connections.broadcast({"type": "risk", "user_id": txn.user_id, "decision": resp["decision"], "risk": resp["explanation"]["risk_score"], "flagged": resp.get("flagged", False)})
     if resp["decision"] == "BLOCK":
         metrics["blocks"] += 1
@@ -260,6 +268,11 @@ body { font-family: ui-sans-serif, system-ui, -apple-system; margin:0; backgroun
       <input id="f_merchant" placeholder="merchant" value="Electronics" />
       <input id="f_time" placeholder="timestamp (HH:MM)" value="23:12" />
     </div>
+    <div class="form-row">
+      <input id="f_payee" placeholder="payee_id (recipient)" value="person_abc" />
+      <input id="f_lat" placeholder="upi_lat (actual)" type="number" step="0.0001" />
+      <input id="f_lon" placeholder="upi_lon (actual)" type="number" step="0.0001" />
+    </div>
     <button class="btn" id="btnSend">Send Transaction</button>
     <div id="lastResp" style="margin-top:8px;color:var(--muted)"></div>
   </div>
@@ -325,7 +338,10 @@ document.getElementById('btnSend').onclick = async () => {
     location: document.getElementById('f_location').value || 'Delhi',
     device_id: document.getElementById('f_device').value || 'device_78',
     merchant: document.getElementById('f_merchant').value || 'Electronics',
-    timestamp: document.getElementById('f_time').value || '23:12'
+    timestamp: document.getElementById('f_time').value || '23:12',
+    payee_id: document.getElementById('f_payee').value || 'person_abc',
+    upi_lat: parseFloat(document.getElementById('f_lat').value || 'NaN'),
+    upi_lon: parseFloat(document.getElementById('f_lon').value || 'NaN')
   };
   const r = await fetch('/precheck', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
   const j = await r.json();
