@@ -89,3 +89,30 @@ async def rate_limit_allow(user_id: str) -> bool:
     if v == 1:
         await r.expire(key, 60)
     return v <= RATE_LIMIT_MAX_PER_MIN
+
+async def set_callback(user_id: str, url: str, secret: str) -> None:
+    r = await init_redis()
+    key = f"user:{user_id}:callback"
+    await r.hset(key, mapping={"url": url, "secret": secret})
+
+async def get_callback(user_id: str) -> Dict[str, Any]:
+    r = await init_redis()
+    key = f"user:{user_id}:callback"
+    v = await r.hgetall(key)
+    return v or {}
+
+async def pending_set(txn_hash: str, data: Dict[str, Any], ttl: int = 120) -> None:
+    r = await init_redis()
+    key = f"pending:{txn_hash}"
+    await r.set(key, json.dumps(data), ex=ttl)
+
+async def pending_get(txn_hash: str) -> Optional[Dict[str, Any]]:
+    r = await init_redis()
+    key = f"pending:{txn_hash}"
+    v = await r.get(key)
+    return json.loads(v) if v else None
+
+async def pending_clear(txn_hash: str) -> None:
+    r = await init_redis()
+    key = f"pending:{txn_hash}"
+    await r.set(key, "", ex=1)
