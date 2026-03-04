@@ -9,7 +9,7 @@ from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from app.config import MODEL_FLAG_THRESHOLD
-from app.cache import init_redis, transaction_key, cache_get, cache_set, get_user_profile, update_user_profile, rate_limit_allow, set_callback, get_callback, pending_set, pending_get, pending_clear
+from app.cache import init_redis, transaction_key, cache_get, cache_set, get_user_profile, update_user_profile, rate_limit_allow, set_callback, get_callback, pending_set, pending_get, pending_clear, set_mobile, get_mobile
 from app.rules import compute_rules
 from app.anomaly import compute_anomaly
 from app.models import model
@@ -37,6 +37,11 @@ class CallbackRegistration(BaseModel):
 class ConfirmRequest(BaseModel):
     txn_hash: str
     approve: bool
+
+class MobileRegistration(BaseModel):
+    user_id: str
+    url: str
+    phone: str
 
 class Connections:
     def __init__(self):
@@ -142,6 +147,19 @@ async def precheck(txn: Transaction):
                 except Exception:
                     pass
             asyncio.create_task(notify())
+        mob = await get_mobile(txn.user_id)
+        murl = mob.get("url")
+        phone = mob.get("phone")
+        if murl and phone:
+            async def notify_mobile():
+                import requests
+                try:
+                    text = f"Risk alert {int(agg['risk_score']*100)}% {txn.merchant} {txn.amount} at {txn.location}"
+                    requests.post(murl, json={"phone": phone, "text": text}, timeout=2)
+                except Exception:
+                    pass
+            asyncio.create_task(notify_mobile())
+        await connections.broadcast({"type":"precheck","user_id":txn.user_id,"txn_hash":key,"risk":agg["risk_score"],"reasons":reasons})
     return JSONResponse(resp)
 
 @app.post("/confirm")
@@ -160,6 +178,10 @@ async def register_callback(reg: CallbackRegistration):
     await set_callback(reg.user_id, reg.url, reg.secret)
     return JSONResponse({"status":"ok"})
 
+@app.post("/register_mobile")
+async def register_mobile(reg: MobileRegistration):
+    await set_mobile(reg.user_id, reg.url, reg.phone)
+    return JSONResponse({"status":"ok"})
 @app.get("/metrics")
 async def get_metrics():
     return JSONResponse(metrics)
@@ -279,6 +301,22 @@ ws.onmessage = (ev) => {
     if (chart.data.labels.length > 60) { chart.data.labels.shift(); chart.data.datasets[0].data.shift(); }
     chart.update('none');
   }
+  if (msg.type === 'precheck') {
+    const s = document.getElementById('stream');
+    const d = document.createElement('div');
+    d.innerHTML = '<span class=\"pill flag\">FLAG</span> user=' + msg.user_id + ' risk=' + (msg.risk*100).toFixed(1) + '% ' +
+      '<button class=\"btn\" id=\"btnApprove\">Approve</button> ' +
+      '<button class=\"btn\" id=\"btnBlock\" style=\"background:#ef4444;color:white\">Block</button>';
+    s.prepend(d);
+    document.getElementById('btnApprove').onclick = async () => {
+      const r = await fetch('/confirm', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ txn_hash: msg.txn_hash, approve: true }) });
+      await r.json();
+    };
+    document.getElementById('btnBlock').onclick = async () => {
+      const r = await fetch('/confirm', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ txn_hash: msg.txn_hash, approve: false }) });
+      await r.json();
+    };
+  }
 };
 document.getElementById('btnSend').onclick = async () => {
   const payload = {
@@ -289,9 +327,15 @@ document.getElementById('btnSend').onclick = async () => {
     merchant: document.getElementById('f_merchant').value || 'Electronics',
     timestamp: document.getElementById('f_time').value || '23:12'
   };
-  const r = await fetch('/transaction', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+  const r = await fetch('/precheck', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
   const j = await r.json();
-  document.getElementById('lastResp').innerText = 'Decision: ' + j.decision + ' • Risk: ' + (j.explanation.risk_score*100).toFixed(1) + '%';
+  if (!j.flagged) {
+    const r2 = await fetch('/transaction', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const j2 = await r2.json();
+    document.getElementById('lastResp').innerText = 'Decision: ' + j2.decision + ' • Risk: ' + (j2.explanation.risk_score*100).toFixed(1) + '%';
+  } else {
+    document.getElementById('lastResp').innerText = 'Flagged: risk ' + (j.explanation.risk_score*100).toFixed(1) + '%';
+  }
 };
 </script>
 </body>

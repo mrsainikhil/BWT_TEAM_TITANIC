@@ -8,3 +8,5 @@ APP_PORT = int(os.getenv("APP_PORT", "8000"))
 WS_CHANNEL = "fraud_ws_stream"
 MODEL_FLAG_THRESHOLD = float(os.getenv("MODEL_FLAG_THRESHOLD", "0.6"))
 GEO_DISTANCE_THRESHOLD_KM = float(os.getenv("GEO_DISTANCE_THRESHOLD_KM", "50"))
+SMS_WEBHOOK_URL = os.getenv("SMS_WEBHOOK_URL", "")
+SMS_SENDER = os.getenv("SMS_SENDER", "SentinelPay")

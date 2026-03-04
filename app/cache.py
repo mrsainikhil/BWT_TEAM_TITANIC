@@ -116,3 +116,14 @@ async def pending_clear(txn_hash: str) -> None:
     r = await init_redis()
     key = f"pending:{txn_hash}"
     await r.set(key, "", ex=1)
+
+async def set_mobile(user_id: str, url: str, phone: str) -> None:
+    r = await init_redis()
+    key = f"user:{user_id}:mobile"
+    await r.hset(key, mapping={"url": url, "phone": phone})
+
+async def get_mobile(user_id: str) -> Dict[str, Any]:
+    r = await init_redis()
+    key = f"user:{user_id}:mobile"
+    v = await r.hgetall(key)
+    return v or {}
