@@ -1,41 +1,39 @@
-from typing import Dict, Any
-import math
+from typing import Dict, Any, List
+import os
+import joblib
+import numpy as np
+from app.config import MODEL_PATH
 
-class RiskModel:
+class FraudModel:
     def __init__(self):
-        self.weights = {
-            "amount": 0.00001,
-            "merchant_electronics": 0.2,
-            "merchant_luxury": 0.25,
-            "merchant_crypto": 0.3,
-            "odd_hour": 0.15,
-            "new_device": 0.2,
-            "unusual_location": 0.2,
-        }
-        self.bias = -2.0
+        self.model = None
+        self.feature_names: List[str] = []
+        self._load()
 
-    def predict_proba(self, txn: Dict[str, Any]) -> float:
-        x = 0.0
-        x += self.weights["amount"] * float(txn.get("amount", 0.0))
-        m = str(txn.get("merchant", "")).lower()
-        if m == "electronics":
-            x += self.weights["merchant_electronics"]
-        if m == "luxury":
-            x += self.weights["merchant_luxury"]
-        if m == "crypto":
-            x += self.weights["merchant_crypto"]
-        ts = str(txn.get("timestamp", "00:00"))
+    def _load(self):
         try:
-            h = int(ts.split(":")[0])
-        except:
-            h = 0
-        if h < 6 or h > 22:
-            x += self.weights["odd_hour"]
-        if txn.get("new_device_flag"):
-            x += self.weights["new_device"]
-        if txn.get("unusual_location_flag"):
-            x += self.weights["unusual_location"]
-        x += self.bias
-        return 1.0 / (1.0 + math.exp(-x))
+            obj = joblib.load(MODEL_PATH)
+            self.model = obj.get("model")
+            self.feature_names = obj.get("features", [])
+        except Exception:
+            self.model = None
+            self.feature_names = []
 
-model = RiskModel()
+    def is_loaded(self) -> bool:
+        return self.model is not None
+
+    def predict_proba(self, features: Dict[str, float]) -> float:
+        if not self.model or not self.feature_names:
+            # fallback: simple heuristic using amount
+            amt = float(features.get("amount", 0.0))
+            return 1.0 / (1.0 + np.exp(-(amt / 100000.0 - 0.5)))
+        x = np.array([[features.get(n, 0.0) for n in self.feature_names]], dtype=float)
+        try:
+            # LightGBM sklearn API predict_proba
+            proba = self.model.predict_proba(x)
+            return float(proba[0][1])
+        except Exception:
+            y = self.model.predict(x)
+            return float(y[0])
+
+model = FraudModel()

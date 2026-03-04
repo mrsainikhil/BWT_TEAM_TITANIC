@@ -13,8 +13,14 @@ from app.cache import init_redis, transaction_key, cache_get, cache_set, get_use
 from app.rules import compute_rules
 from app.anomaly import compute_anomaly
 from app.models import model
-from app.aggregator import aggregate
+from features.feature_pipeline import feature_pipeline
+from graph.graph_builder import add_transaction_edge, build_graph
+from graph.graph_anomaly import compute_graph_anomaly
+from risk.risk_aggregator import aggregate_scores
 from app.decision import decide
+from streaming.producer import enqueue_transaction
+from explainability.shap_explainer import ShapExplainer
+from llm.fraud_analyst import explain_natural
 
 app = FastAPI()
 
@@ -73,6 +79,12 @@ metrics = {
     "otp_verifications": 0,
     "approvals": 0,
     "flags": 0,
+    "latency_ms_p50": 0.0,
+    "latency_ms_p95": 0.0,
+    "latency_samples": [],
+    "model_confidence_avg": 0.0,
+    "detection_rate": 0.0,
+    "false_positive_rate": 0.0,
 }
 
 @app.on_event("startup")
@@ -86,6 +98,10 @@ async def process_transaction(txn: Transaction, request: Request):
     if not await rate_limit_allow(txn.user_id):
         raise HTTPException(status_code=429, detail="rate_limited")
     payload = txn.model_dump()
+    try:
+        await enqueue_transaction(payload)
+    except Exception:
+        pass
     key = transaction_key(payload)
     cached = await cache_get(key)
     if cached:
@@ -99,13 +115,24 @@ async def process_transaction(txn: Transaction, request: Request):
         new_device_flag = "new_device" in rule_reasons
         payload["unusual_location_flag"] = unusual_location_flag
         payload["new_device_flag"] = new_device_flag
-        ml_prob = model.predict_proba(payload)
+        feats = await feature_pipeline(payload, profile)
+        ml_prob = model.predict_proba(feats)
         anomaly_score, anomaly_reasons = compute_anomaly(payload, profile)
-        agg = aggregate(rule_score, ml_prob, anomaly_score)
-        all_reasons = list(dict.fromkeys(rule_reasons + anomaly_reasons))
+        await add_transaction_edge(payload)
+        G = await build_graph()
+        graph_score, graph_reasons = compute_graph_anomaly(G, payload)
+        agg = aggregate_scores(rule_score, ml_prob, anomaly_score, graph_score)
+        all_reasons = list(dict.fromkeys(rule_reasons + anomaly_reasons + graph_reasons))
         decision, explanation = decide(agg["risk_score"], all_reasons)
+        top = []
+        try:
+            if model.is_loaded():
+                expl = ShapExplainer(model.model, model.feature_names)
+                top = expl.top_reasons(feats, k=3)
+        except Exception:
+            top = []
         flagged = agg["risk_score"] >= MODEL_FLAG_THRESHOLD
-        resp = {"decision": decision, "explanation": explanation, "flagged": flagged}
+        resp = {"decision": decision, "explanation": {"risk_score": explanation["risk_score"], "reasons": explanation["reasons"], "top_reasons": top}, "flagged": flagged}
         await cache_set(key, resp)
         await update_user_profile(txn.user_id, {"transaction_frequency": profile.get("transaction_frequency", 1) + 1})
         try:
@@ -115,6 +142,12 @@ async def process_transaction(txn: Transaction, request: Request):
         if payload.get("payee_id") and payload["payee_id"] not in rh:
             rh.append(payload["payee_id"])
             await update_user_profile(txn.user_id, {"recipient_history": json.dumps(rh)})
+    if request.query_params.get("explain_llm") == "true":
+        try:
+            nat = explain_natural(resp["decision"], float(resp["explanation"]["risk_score"]), resp["explanation"].get("reasons", []))
+            resp["explanation"]["natural"] = nat
+        except Exception:
+            pass
     await connections.broadcast({"type": "risk", "user_id": txn.user_id, "decision": resp["decision"], "risk": resp["explanation"]["risk_score"], "flagged": resp.get("flagged", False)})
     if resp["decision"] == "BLOCK":
         metrics["blocks"] += 1
@@ -128,6 +161,19 @@ async def process_transaction(txn: Transaction, request: Request):
     metrics["avg_response_ms"] = ((metrics["avg_response_ms"] * (metrics["request_count"] - 1)) + dt) / metrics["request_count"]
     total = metrics["cache_hits"] + metrics["cache_misses"]
     metrics["cache_hit_ratio"] = (metrics["cache_hits"] / total) if total > 0 else 0.0
+    metrics["latency_samples"].append(dt)
+    if len(metrics["latency_samples"]) > 200:
+        metrics["latency_samples"] = metrics["latency_samples"][-200:]
+    s = sorted(metrics["latency_samples"])
+    if s:
+        metrics["latency_ms_p50"] = s[int(0.5*len(s))]
+        metrics["latency_ms_p95"] = s[int(0.95*len(s))-1]
+    rc = metrics["request_count"]
+    if rc > 0:
+        metrics["detection_rate"] = metrics["flags"] / rc
+        metrics["model_confidence_avg"] = ((metrics.get("model_confidence_avg", 0.0) * (rc - 1)) + float(resp["explanation"]["risk_score"])) / rc
+        b = metrics["blocks"]
+        metrics["false_positive_rate"] = max(0.0, (b - metrics["flags"]) / rc)
     return JSONResponse(resp)
 
 @app.post("/precheck")
@@ -138,12 +184,22 @@ async def precheck(txn: Transaction):
     rule_score, rule_reasons = compute_rules(payload, profile)
     payload["unusual_location_flag"] = "unusual_location" in rule_reasons
     payload["new_device_flag"] = "new_device" in rule_reasons
-    ml_prob = model.predict_proba(payload)
+    feats = await feature_pipeline(payload, profile)
+    ml_prob = model.predict_proba(feats)
     anomaly_score, anomaly_reasons = compute_anomaly(payload, profile)
-    agg = aggregate(rule_score, ml_prob, anomaly_score)
-    reasons = list(dict.fromkeys(rule_reasons + anomaly_reasons))
+    G = await build_graph()
+    graph_score, graph_reasons = compute_graph_anomaly(G, payload)
+    agg = aggregate_scores(rule_score, ml_prob, anomaly_score, graph_score)
+    reasons = list(dict.fromkeys(rule_reasons + anomaly_reasons + graph_reasons))
     flagged = agg["risk_score"] >= MODEL_FLAG_THRESHOLD
-    resp = {"txn_hash": key, "flagged": flagged, "decision_preview": decide(agg["risk_score"], reasons)[0], "explanation": {"risk_score": agg["risk_score"], "reasons": reasons}}
+    top = []
+    try:
+        if model.is_loaded():
+            expl = ShapExplainer(model.model, model.feature_names)
+            top = expl.top_reasons(feats, k=3)
+    except Exception:
+        top = []
+    resp = {"txn_hash": key, "flagged": flagged, "decision_preview": decide(agg["risk_score"], reasons)[0], "explanation": {"risk_score": agg["risk_score"], "reasons": reasons, "top_reasons": top}}
     if flagged:
         await pending_set(key, resp)
         cb = await get_callback(txn.user_id)
@@ -251,6 +307,8 @@ body { font-family: ui-sans-serif, system-ui, -apple-system; margin:0; backgroun
       <div class="metric"><div class="k">Avg response (ms)</div><div class="v" id="m_rt">0</div></div>
       <div class="metric"><div class="k">Cache hit (%)</div><div class="v" id="m_hit">0</div></div>
       <div class="metric"><div class="k">Approvals / OTP / Blocks</div><div class="v" id="m_counts">0 / 0 / 0</div></div>
+      <div class="metric"><div class="k">Latency p50 / p95 (ms)</div><div class="v" id="m_lat">0 / 0</div></div>
+      <div class="metric"><div class="k">Model confidence avg</div><div class="v" id="m_conf">0</div></div>
     </div>
     <canvas id="rtChart" height="120" style="margin-top:12px;"></canvas>
   </div>
@@ -297,6 +355,8 @@ async function loadMetrics() {
   document.getElementById('m_rt').innerText = m.avg_response_ms.toFixed(1);
   document.getElementById('m_hit').innerText = (m.cache_hit_ratio*100).toFixed(1);
   document.getElementById('m_counts').innerText = `${m.approvals} / ${m.otp_verifications} / ${m.blocks}`;
+  document.getElementById('m_lat').innerText = `${m.latency_ms_p50.toFixed(1)} / ${m.latency_ms_p95.toFixed(1)}`;
+  document.getElementById('m_conf').innerText = m.model_confidence_avg.toFixed(2);
 }
 setInterval(loadMetrics, 1000); loadMetrics();
 const ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws');
