@@ -45,3 +45,6 @@ Chart.js
 Data:
 
 Credit Card Fraud Dataset (simulated)
+
+
+![SentinelPay Architecture](assets/architecture.jpeg)
