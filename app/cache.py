@@ -31,7 +31,11 @@ async def init_redis() -> Redis:
     if redis is None:
         try:
             r = Redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
-            redis = r
+            try:
+                await r.ping()
+                redis = r
+            except Exception:
+                redis = _Mem()
         except Exception:
             redis = _Mem()
     return redis
@@ -60,6 +64,7 @@ async def get_user_profile(user_id: str) -> Dict[str, Any]:
             "avg_amount": 500.0,
             "std_amount": 200.0,
             "frequent_locations": json.dumps(["Delhi"]),
+            "frequent_geo_locations": json.dumps([{"lat": 28.6139, "lon": 77.2090}]),
             "device_history": json.dumps([]),
             "transaction_frequency": 1,
         }
@@ -67,6 +72,7 @@ async def get_user_profile(user_id: str) -> Dict[str, Any]:
         "avg_amount": float(v.get("avg_amount", 500.0)),
         "std_amount": float(v.get("std_amount", 200.0)),
         "frequent_locations": v.get("frequent_locations", json.dumps(["Delhi"])),
+        "frequent_geo_locations": v.get("frequent_geo_locations", json.dumps([{"lat": 28.6139, "lon": 77.2090}])),
         "device_history": v.get("device_history", json.dumps([])),
         "transaction_frequency": int(v.get("transaction_frequency", 1)),
     }

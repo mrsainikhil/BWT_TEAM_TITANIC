@@ -5,6 +5,7 @@ from typing import Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel
+from .config import MODEL_FLAG_THRESHOLD
 from .cache import init_redis, transaction_key, cache_get, cache_set, get_user_profile, update_user_profile, rate_limit_allow
 from .rules import compute_rules
 from .anomaly import compute_anomaly
@@ -21,6 +22,9 @@ class Transaction(BaseModel):
     device_id: str
     merchant: str
     timestamp: str
+    upi_app: str | None = None
+    upi_lat: float | None = None
+    upi_lon: float | None = None
 
 class Connections:
     def __init__(self):
@@ -49,6 +53,7 @@ metrics = {
     "blocks": 0,
     "otp_verifications": 0,
     "approvals": 0,
+    "flags": 0,
 }
 
 @app.on_event("startup")
@@ -80,16 +85,19 @@ async def process_transaction(txn: Transaction, request: Request):
         agg = aggregate(rule_score, ml_prob, anomaly_score)
         all_reasons = list(dict.fromkeys(rule_reasons + anomaly_reasons))
         decision, explanation = decide(agg["risk_score"], all_reasons)
-        resp = {"decision": decision, "explanation": explanation}
+        flagged = agg["risk_score"] >= MODEL_FLAG_THRESHOLD
+        resp = {"decision": decision, "explanation": explanation, "flagged": flagged}
         await cache_set(key, resp)
         await update_user_profile(txn.user_id, {"transaction_frequency": profile.get("transaction_frequency", 1) + 1})
-    await connections.broadcast({"type": "risk", "user_id": txn.user_id, "decision": resp["decision"], "risk": resp["explanation"]["risk_score"]})
+    await connections.broadcast({"type": "risk", "user_id": txn.user_id, "decision": resp["decision"], "risk": resp["explanation"]["risk_score"], "flagged": resp.get("flagged", False)})
     if resp["decision"] == "BLOCK":
         metrics["blocks"] += 1
     elif resp["decision"] == "OTP_VERIFICATION":
         metrics["otp_verifications"] += 1
     else:
         metrics["approvals"] += 1
+    if resp.get("flagged"):
+        metrics["flags"] += 1
     dt = (time.perf_counter() - t0) * 1000
     metrics["avg_response_ms"] = ((metrics["avg_response_ms"] * (metrics["request_count"] - 1)) + dt) / metrics["request_count"]
     total = metrics["cache_hits"] + metrics["cache_misses"]
