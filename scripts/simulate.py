@@ -1,11 +1,13 @@
-import asyncio
-import aiohttp
+import concurrent.futures
+import requests
 import random
 
-async def send(txn):
-    async with aiohttp.ClientSession() as s:
-        async with s.post("http://localhost:8000/transaction", json=txn) as r:
-            print(await r.json())
+def send(txn):
+    try:
+        r = requests.post("http://localhost:8000/transaction", json=txn, timeout=2)
+        print(r.json())
+    except Exception as e:
+        print({"error": str(e)})
 
 def scenario_high_amount(user_id):
     return {
@@ -27,13 +29,14 @@ def scenario_new_location(user_id):
         "timestamp": f"{random.randint(0,23)}:{random.randint(0,59):02d}",
     }
 
-async def main():
+def main():
     txns = []
     for _ in range(5):
         txns.append(scenario_high_amount("user_42"))
     for _ in range(5):
         txns.append(scenario_new_location("user_42"))
-    await asyncio.gather(*(send(t) for t in txns))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=5) as ex:
+        list(ex.map(send, txns))
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
