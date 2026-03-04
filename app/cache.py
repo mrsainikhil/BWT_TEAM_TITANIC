@@ -1,0 +1,85 @@
+import hashlib
+import json
+from typing import Any, Dict, Optional
+from redis.asyncio import Redis
+from .config import REDIS_URL, CACHE_TTL_SECONDS, RATE_LIMIT_MAX_PER_MIN
+
+redis: Optional[Redis] = None
+
+class _Mem:
+    def __init__(self):
+        self.kv: Dict[str, str] = {}
+        self.h: Dict[str, Dict[str, str]] = {}
+        self.counters: Dict[str, int] = {}
+    async def get(self, k: str):
+        return self.kv.get(k)
+    async def set(self, k: str, v: str, ex: Optional[int] = None):
+        self.kv[k] = v
+    async def hgetall(self, k: str):
+        return self.h.get(k, {})
+    async def hset(self, k: str, mapping: Dict[str, str]):
+        self.h.setdefault(k, {}).update(mapping)
+    async def incr(self, k: str):
+        v = self.counters.get(k, 0) + 1
+        self.counters[k] = v
+        return v
+    async def expire(self, k: str, sec: int):
+        return True
+
+async def init_redis() -> Redis:
+    global redis
+    if redis is None:
+        try:
+            r = Redis.from_url(REDIS_URL, encoding="utf-8", decode_responses=True)
+            redis = r
+        except Exception:
+            redis = _Mem()
+    return redis
+
+def transaction_key(payload: Dict[str, Any]) -> str:
+    s = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return "txn:" + hashlib.sha256(s.encode()).hexdigest()
+
+async def cache_get(key: str) -> Optional[Dict[str, Any]]:
+    r = await init_redis()
+    v = await r.get(key)
+    if v is None:
+        return None
+    return json.loads(v)
+
+async def cache_set(key: str, value: Dict[str, Any], ttl: int = CACHE_TTL_SECONDS) -> None:
+    r = await init_redis()
+    await r.set(key, json.dumps(value), ex=ttl)
+
+async def get_user_profile(user_id: str) -> Dict[str, Any]:
+    r = await init_redis()
+    key = f"user:{user_id}:profile"
+    v = await r.hgetall(key)
+    if not v:
+        return {
+            "avg_amount": 500.0,
+            "std_amount": 200.0,
+            "frequent_locations": json.dumps(["Delhi"]),
+            "device_history": json.dumps([]),
+            "transaction_frequency": 1,
+        }
+    return {
+        "avg_amount": float(v.get("avg_amount", 500.0)),
+        "std_amount": float(v.get("std_amount", 200.0)),
+        "frequent_locations": v.get("frequent_locations", json.dumps(["Delhi"])),
+        "device_history": v.get("device_history", json.dumps([])),
+        "transaction_frequency": int(v.get("transaction_frequency", 1)),
+    }
+
+async def update_user_profile(user_id: str, fields: Dict[str, Any]) -> None:
+    r = await init_redis()
+    key = f"user:{user_id}:profile"
+    await r.hset(key, mapping={k: str(v) for k, v in fields.items()})
+
+async def rate_limit_allow(user_id: str) -> bool:
+    r = await init_redis()
+    key = f"ratelimit:{user_id}"
+    v = await r.incr(key)
+    if v == 1:
+        await r.expire(key, 60)
+    return v <= RATE_LIMIT_MAX_PER_MIN
