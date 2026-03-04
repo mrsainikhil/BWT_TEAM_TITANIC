@@ -9,7 +9,30 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - RATE_LIMIT_MAX_PER_MIN=120
       - CACHE_TTL_SECONDS=60
+      - STREAM_TXN=stream:txn
+      - STREAM_DECISION=stream:decision
+      - MODEL_PATH=/app/ml/fraud_model.pkl
     ports:
       - "8000:8000"
+    depends_on:
+      - redis
+  fraud_worker:
+    build: .
+    command: ["python", "-m", "streaming.consumer"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - STREAM_TXN=stream:txn
+      - STREAM_DECISION=stream:decision
+      - MODEL_PATH=/app/ml/fraud_model.pkl
+    depends_on:
+      - redis
+  model_service:
+    build: .
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8001"]
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - MODEL_PATH=/app/ml/fraud_model.pkl
+    ports:
+      - "8001:8001"
     depends_on:
       - redis
